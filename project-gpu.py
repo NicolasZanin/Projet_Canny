@@ -47,6 +47,42 @@ def gpu_rgb_to_bw(image):
 
     return output
 
+@cuda.jit
+def GaussianBlurKernel(source, destination, filter):
+    x, y = cuda.grid(2)
+    if x < source.shape[0] and y < source.shape[1]:
+        height, width, channel = source.shape
+        for c in range(channel):
+            weighted_sum = 0
+            normalization_factor = 0
+            for i in range(len(filter)):
+                for j in range(len(filter[0])):
+                    nx = x + i - len(filter) // 2
+                    ny = y + j - len(filter[0]) // 2
+                    if nx >= 0 and nx < width and ny >= 0 and ny < height:
+                        pixel_value = source[ny, nx, c]
+                    else:
+                        pixel_value = source[y, x, c]  # Use current pixel value as substitute
+                    weighted_sum += pixel_value * filter[i][j]
+                    normalization_factor += filter[i][j]
+            if normalization_factor != 0:
+                destination[y, x, c] = int(weighted_sum / normalization_factor)
+            else:
+                destination[y, x, c] = source[y, x, c]  # Preserve original pixel value for edge pixels
+
+def gpu_gaussian_blur(image, threadsPerBlock, blocksPerGrid):
+    s_image = cuda.to_device(image)
+    d_image = cuda.device_array_like(image)
+    filter = np.array([[1, 4, 6, 4, 1],
+                       [4, 16, 24, 16, 4],
+                       [6, 24, 36, 24, 6],
+                       [4, 16, 24, 16, 4],
+                       [1, 4, 6, 4, 1]])
+
+    GaussianBlurKernel[blocksPerGrid, threadsPerBlock](s_image, d_image, filter)
+
+    return d_image.copy_to_host()
+
 def getAllArgs():
     global inputImage, outputImage, nombreThreads, applyBw, applyGaussian, applySobel, applyThreshold
     
@@ -84,7 +120,19 @@ if __name__ == '__main__':
     temp = Image.open(inputImage)
     temptab = np.array(temp)
     
-    if applyBw:
-        output = gpu_rgb_to_bw(temptab)
+    if applyBw:  
+        temptab = gpu_rgb_to_bw(temptab)
+        temp = Image.fromarray(temptab)
+        print(temptab)
+        print(temp)
+
+    if applyGaussian:  
+        threadsPerBlock = (8, 8)
+        width, height = temptab.shape[1], temptab.shape[0]
+        blocksPerGrid_x = math.ceil(width / threadsPerBlock[0])
+        blocksPerGrid_y = math.ceil(height / threadsPerBlock[1])
+        blocksPerGrid = (blocksPerGrid_x, blocksPerGrid_y)
+
+        output = gpu_gaussian_blur(temptab, threadsPerBlock, blocksPerGrid)
         m = Image.fromarray(output)
         m.save(outputImage)
