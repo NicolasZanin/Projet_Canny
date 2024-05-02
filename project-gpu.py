@@ -14,6 +14,7 @@ applyBw = False
 applyGaussian = False
 applySobel = False
 applyThreshold = False
+threadBlockSize = (8, 8)  # Default thread block size
 
 @cuda.jit
 def RGBToBWKernel(source, destination, offset):
@@ -26,7 +27,7 @@ def RGBToBWKernel(source, destination, offset):
         destination[r_x,r_y]=np.uint8(0.3*source[r_x,r_y,0]+0.59*source[r_x,r_y,1]+0.11*source[r_x,r_y,2])
 
 def gpu_rgb_to_bw(image):
-    threadsperblock = (8, 8)
+    threadsperblock = threadBlockSize
     width, height = image.shape[1], image.shape[0]
     blockspergrid_x = math.ceil(width / threadsperblock[0])
     blockspergrid_y = math.ceil(height / threadsperblock[1])
@@ -136,7 +137,7 @@ def threshold_image(image, threadsPerBlock, blocksPerGrid, threshold):
     return d_image.copy_to_host()
 
 def getAllArgs():
-    global inputImage, outputImage, nombreThreads, applyBw, applyGaussian, applySobel, applyThreshold
+    global inputImage, outputImage, nombreThreads, applyBw, applyGaussian, applySobel, applyThreshold, threadBlockSize
     
     parser = argparse.ArgumentParser()
     
@@ -151,7 +152,10 @@ def getAllArgs():
     args = parser.parse_args()
 
     if args.tb is not None:
-        nombreThreads = args.tb
+        threadBlockSize = (args.tb, args.tb)
+    else:
+        threadBlockSize = (8, 8)  # Default thread block size
+
     if args.bw:
         applyBw = True
     if args.gauss:
@@ -173,13 +177,12 @@ if __name__ == '__main__':
     temptab = np.array(temp)
     
     if applyGaussian:  
-        threadsPerBlock = (8, 8)
         width, height = temptab.shape[1], temptab.shape[0]
-        blocksPerGrid_x = math.ceil(width / threadsPerBlock[0])
-        blocksPerGrid_y = math.ceil(height / threadsPerBlock[1])
+        blocksPerGrid_x = math.ceil(width / threadBlockSize[0])
+        blocksPerGrid_y = math.ceil(height / threadBlockSize[1])
         blocksPerGrid = (blocksPerGrid_x, blocksPerGrid_y)
 
-        output_gauss = gpu_gaussian_blur(temptab, threadsPerBlock, blocksPerGrid)
+        output_gauss = gpu_gaussian_blur(temptab, threadBlockSize, blocksPerGrid)
         temptab = output_gauss
 
     if applyBw:         
@@ -188,19 +191,18 @@ if __name__ == '__main__':
 
     if applySobel:
         if applyBw:
-            threadsPerBlock = (8, 8)
             width, height = temptab.shape[1], temptab.shape[0]
-            blocksPerGrid_x = math.ceil(width / threadsPerBlock[0])
-            blocksPerGrid_y = math.ceil(height / threadsPerBlock[1])
+            blocksPerGrid_x = math.ceil(width / threadBlockSize[0])
+            blocksPerGrid_y = math.ceil(height / threadBlockSize[1])
             blocksPerGrid = (blocksPerGrid_x, blocksPerGrid_y)
           
-            magnitude = compute_gradients(temptab, threadsPerBlock, blocksPerGrid)
+            magnitude = compute_gradients(temptab, threadBlockSize, blocksPerGrid)
             # You can use magnitude and angle arrays for further processing or visualization
             temptab = magnitude.astype(np.uint8)
             
             if applyThreshold:
-                threshold_value = 100  # Adjust threshold value as needed
-                thresholded_image = threshold_image(temptab, threadsPerBlock, blocksPerGrid, threshold_value)
+                threshold_value = 90  # Adjust threshold value as needed
+                thresholded_image = threshold_image(temptab, threadBlockSize, blocksPerGrid, threshold_value)
                 temptab = thresholded_image
 
     m = Image.fromarray(temptab)
