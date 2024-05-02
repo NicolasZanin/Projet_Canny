@@ -50,8 +50,8 @@ def gpu_rgb_to_bw(image):
 @cuda.jit
 def GaussianBlurKernel(source, destination, filter):
     x, y = cuda.grid(2)
-    if x < source.shape[0] and y < source.shape[1]:
-        height, width, channel = source.shape
+    if x < source.shape[1] and y < source.shape[0]:  # Correction ici
+        height, width, channel = source.shape  # Correction ici
         for c in range(channel):
             weighted_sum = 0
             normalization_factor = 0
@@ -120,12 +120,6 @@ if __name__ == '__main__':
     temp = Image.open(inputImage)
     temptab = np.array(temp)
     
-    if applyBw:  
-        temptab = gpu_rgb_to_bw(temptab)
-        temp = Image.fromarray(temptab)
-        print(temptab)
-        print(temp)
-
     if applyGaussian:  
         threadsPerBlock = (8, 8)
         width, height = temptab.shape[1], temptab.shape[0]
@@ -133,6 +127,12 @@ if __name__ == '__main__':
         blocksPerGrid_y = math.ceil(height / threadsPerBlock[1])
         blocksPerGrid = (blocksPerGrid_x, blocksPerGrid_y)
 
-        output = gpu_gaussian_blur(temptab, threadsPerBlock, blocksPerGrid)
-        m = Image.fromarray(output)
-        m.save(outputImage)
+        output_gauss = gpu_gaussian_blur(temptab, threadsPerBlock, blocksPerGrid)
+        temptab = output_gauss
+
+    if applyBw:         
+        output_bw = gpu_rgb_to_bw(temptab)
+        temptab = output_bw
+
+    m = Image.fromarray(temptab)
+    m.save(outputImage)
