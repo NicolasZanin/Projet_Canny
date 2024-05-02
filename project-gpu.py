@@ -91,6 +91,15 @@ def GradientsKernel(source, destination, sobel_x, sobel_y, max_value):
         magnitude = min(magnitude, max_value)  # Clamp the magnitude
         destination[y, x] = magnitude
 
+@cuda.jit
+def ThresholdKernel(source, destination, threshold):
+    x, y = cuda.grid(2)
+    if x < source.shape[0] and y < source.shape[1]:
+        if source[y, x] >= threshold:
+            destination[y, x] = 255  # Potential edge
+        else:
+            destination[y, x] = 0
+
 def gpu_gaussian_blur(image, threadsPerBlock, blocksPerGrid):
     s_image = cuda.to_device(image)
     d_image = cuda.device_array_like(image)
@@ -116,6 +125,14 @@ def compute_gradients(image, threadsPerBlock, blocksPerGrid):
                         [1, 2, 1]])
     max_value = 175
     GradientsKernel[blocksPerGrid, threadsPerBlock] (s_image, d_image, sobel_x, sobel_y, max_value)
+    return d_image.copy_to_host()
+
+def threshold_image(image, threadsPerBlock, blocksPerGrid, threshold):
+    s_image = cuda.to_device(image)
+    d_image = cuda.device_array_like(image)
+
+    ThresholdKernel[blocksPerGrid, threadsPerBlock](s_image, d_image, threshold)
+
     return d_image.copy_to_host()
 
 def getAllArgs():
@@ -180,6 +197,11 @@ if __name__ == '__main__':
             magnitude = compute_gradients(temptab, threadsPerBlock, blocksPerGrid)
             # You can use magnitude and angle arrays for further processing or visualization
             temptab = magnitude.astype(np.uint8)
+            
+            if applyThreshold:
+                threshold_value = 100  # Adjust threshold value as needed
+                thresholded_image = threshold_image(temptab, threadsPerBlock, blocksPerGrid, threshold_value)
+                temptab = thresholded_image
 
     m = Image.fromarray(temptab)
     m.save(outputImage)
