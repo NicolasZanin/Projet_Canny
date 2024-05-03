@@ -28,24 +28,22 @@ def RGBToBWKernel(source, destination, offset):
 
 def gpu_rgb_to_bw(image):
     threadsperblock = threadBlockSize
-    width, height = image.shape[1], image.shape[0]
+    width, height = image.shape[0], image.shape[1]
     blockspergrid_x = math.ceil(width / threadsperblock[0])
     blockspergrid_y = math.ceil(height / threadsperblock[1])
     blockspergrid = (blockspergrid_x, blockspergrid_y)
 
     s_image = cuda.to_device(image)
-    d_image = cuda.device_array((image.shape[0], image.shape[1]), dtype=np.uint8)
+    d_image = cuda.device_array((width, height), dtype=np.uint8)
 
-    offset_range = range(33, 1, -1)
-    for off in offset_range:
+    for off in range(33, 1, -1):
         runs = 6
         result = np.zeros(runs, dtype=np.float32)
         for i in range(runs):
             RGBToBWKernel[blockspergrid, threadsperblock](s_image, d_image, off)
             cuda.synchronize()
 
-        output = d_image.copy_to_host()
-
+    output = d_image.copy_to_host()
     return output
 
 @cuda.jit
@@ -171,7 +169,6 @@ def getAllArgs():
 
 if __name__ == '__main__':
     getAllArgs()
-    print("ok")
     print(f"Input image : {inputImage}\nOutputImage : {outputImage}")
     temp = Image.open(inputImage)
     temptab = np.array(temp)
