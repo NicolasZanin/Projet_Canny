@@ -6,6 +6,8 @@ import numba as nb
 from PIL import Image
 import sys
 import math
+import time
+from timeit import default_timer as timer
 
 inputImage = None
 outputImage = None
@@ -16,58 +18,87 @@ applySobel = False
 applyThreshold = False
 threadBlockSize = (8, 8)  # Default thread block size
 
+# Calculate Blocks par grid necessary for the source image depending on threadBlockSize
+def calcultateBlocksPerGrid(imageSource):
+    width, height = imageSource.shape[0], imageSource.shape[1]
+    blockspergrid_x = math.ceil(width / threadBlockSize[0])
+    blockspergrid_y = math.ceil(height / threadBlockSize[1])
+    blockspergrid = (blockspergrid_x, blockspergrid_y)
+    return blockspergrid
+
+# Convert color to gray with GPU
 @cuda.jit
 def RGBToBWKernel(source, destination, offset):
-    height = source.shape[1]
-    width = source.shape[0]
-    x,y = cuda.grid(2)
-    if (x<width and y<height) :
-        r_x= (x+offset)%width
-        r_y= (y+offset)%height
-        destination[r_x,r_y]=np.uint8(0.3*source[r_x,r_y,0]+0.59*source[r_x,r_y,1]+0.11*source[r_x,r_y,2])
+    width, height = source.shape[:2]
+    x, y = cuda.grid(2)
 
-def gpu_rgb_to_bw(image):
-    threadsperblock = threadBlockSize
-    width, height = image.shape[0], image.shape[1]
-    blockspergrid_x = math.ceil(width / threadsperblock[0])
-    blockspergrid_y = math.ceil(height / threadsperblock[1])
-    blockspergrid = (blockspergrid_x, blockspergrid_y)
+    # Verify if the absolute position is smaller than the width and height of source image
+    if (x < width and y < height):
+        # Creates an offset to manage edges
+        r_x = (x + offset) % width 
+        r_y = (y + offset) % height
 
-    s_image = cuda.to_device(image)
-    d_image = cuda.device_array((width, height), dtype=np.uint8)
+        # Formula to convert color in gray
+        destination[r_x, r_y] = np.uint8(0.3 * source[r_x, r_y, 0] + 0.59 * source[r_x, r_y, 1] + 0.1 * source[r_x, r_y, 2]) 
 
-    for off in range(33, 1, -1):
-        runs = 6
-        result = np.zeros(runs, dtype=np.float32)
-        for i in range(runs):
-            RGBToBWKernel[blockspergrid, threadsperblock](s_image, d_image, off)
+# Perform the GPU Kernel BW
+def gpu_rgb_to_bw(source, threadsPerBlock, blockspergrid):
+    width, height = source.shape[:2]
+    device_input_image = cuda.to_device(source)
+    device_output_image = cuda.device_array((width, height), dtype=np.uint8)
+
+    for offset in range(33, 1, -1):
+
+        # Here is 6 iterations by default, but if we raise this number, that upgrade the image quality in output
+        for i in range(6):
+            RGBToBWKernel[blockspergrid, threadsPerBlock](device_input_image, device_output_image, offset)
             cuda.synchronize()
 
-    output = d_image.copy_to_host()
+    output = device_output_image.copy_to_host()
     return output
 
+# Performs Gaussian blurring on a single pixel
 @cuda.jit
 def GaussianBlurKernel(source, destination, filter):
     x, y = cuda.grid(2)
-    if x < source.shape[1] and y < source.shape[0]:
-        height, width, channel = source.shape
-        for c in range(channel):
-            weighted_sum = 0
-            normalization_factor = 0
-            for i in range(len(filter)):
-                for j in range(len(filter[0])):
-                    nx = x + i - len(filter) // 2
-                    ny = y + j - len(filter[0]) // 2
-                    if nx >= 0 and nx < width and ny >= 0 and ny < height:
-                        pixel_value = source[ny, nx, c]
-                    else:
-                        pixel_value = source[y, x, c]  
-                    weighted_sum += pixel_value * filter[i][j]
-                    normalization_factor += filter[i][j]
-            if normalization_factor != 0:
-                destination[y, x, c] = int(weighted_sum / normalization_factor)
-            else:
-                destination[y, x, c] = source[y, x, c]  
+    sizeFilterX, sizeFilterY = filter.shape[:2]
+    
+    if x < source.shape[0] and y < source.shape[1]:
+        width, height = source.shape
+
+        # Apply the convolution filter on a single pixel  
+        weighted_sum = 0
+        normalization_factor = 0
+        
+        for indexFilterX in range(sizeFilterX):
+            for indexFilterY in range(sizeFilterY):
+                source_x = x + indexFilterX - sizeFilterX // 2
+                source_y = y + indexFilterY - sizeFilterY // 2
+                
+                if source_x >= 0 and source_x < width and source_y >= 0 and source_y < height:
+                    pixel_value = source[source_x, source_y]
+                else:
+                    pixel_value = source[indexFilterX, indexFilterY] 
+                
+                weighted_sum += pixel_value * filter[indexFilterX][indexFilterY]
+                normalization_factor += filter[indexFilterX][indexFilterY]
+        
+        if normalization_factor != 0:
+            destination[x, y] = int(math.ceil(weighted_sum // normalization_factor))
+        else:
+            destination[x, y] = source[x, y]
+
+def gpu_gaussian_blur(image, threadsPerBlock, blocksPerGrid):
+    device_input_image = cuda.to_device(image)
+    device_output_image = cuda.device_array_like(image)
+    filter = np.array([[1, 4, 6, 4, 1],
+                       [4, 16, 24, 16, 4],
+                       [6, 24, 36, 24, 6],
+                       [4, 16, 24, 16, 4],
+                       [1, 4, 6, 4, 1]])
+
+    GaussianBlurKernel[blocksPerGrid, threadsPerBlock](device_input_image, device_output_image, filter)
+    return device_output_image.copy_to_host()
 
 @cuda.jit
 def GradientsKernel(source, destination, sobel_x, sobel_y, max_value):
@@ -90,28 +121,6 @@ def GradientsKernel(source, destination, sobel_x, sobel_y, max_value):
         magnitude = min(magnitude, max_value)  # Clamp the magnitude
         destination[y, x] = magnitude
 
-@cuda.jit
-def ThresholdKernel(source, destination, threshold):
-    x, y = cuda.grid(2)
-    if x < source.shape[0] and y < source.shape[1]:
-        if source[y, x] >= threshold:
-            destination[y, x] = 255  # Potential edge
-        else:
-            destination[y, x] = 0
-
-def gpu_gaussian_blur(image, threadsPerBlock, blocksPerGrid):
-    s_image = cuda.to_device(image)
-    d_image = cuda.device_array_like(image)
-    filter = np.array([[1, 4, 6, 4, 1],
-                       [4, 16, 24, 16, 4],
-                       [6, 24, 36, 24, 6],
-                       [4, 16, 24, 16, 4],
-                       [1, 4, 6, 4, 1]])
-
-    GaussianBlurKernel[blocksPerGrid, threadsPerBlock](s_image, d_image, filter)
-
-    return d_image.copy_to_host()
-
 def compute_gradients(image, threadsPerBlock, blocksPerGrid):
     s_image = cuda.to_device(image)
     d_image = cuda.device_array_like(image)
@@ -125,6 +134,15 @@ def compute_gradients(image, threadsPerBlock, blocksPerGrid):
     max_value = 175
     GradientsKernel[blocksPerGrid, threadsPerBlock] (s_image, d_image, sobel_x, sobel_y, max_value)
     return d_image.copy_to_host()
+
+@cuda.jit
+def ThresholdKernel(source, destination, threshold):
+    x, y = cuda.grid(2)
+    if x < source.shape[0] and y < source.shape[1]:
+        if source[y, x] >= threshold:
+            destination[y, x] = 255  # Potential edge
+        else:
+            destination[y, x] = 0
 
 def threshold_image(image, threadsPerBlock, blocksPerGrid, threshold):
     s_image = cuda.to_device(image)
@@ -157,6 +175,7 @@ def getAllArgs():
     if args.bw:
         applyBw = True
     if args.gauss:
+        applyBw = True
         applyGaussian = True
     if args.sobel:
         applySobel = True
@@ -170,37 +189,29 @@ def getAllArgs():
 if __name__ == '__main__':
     getAllArgs()
     print(f"Input image : {inputImage}\nOutputImage : {outputImage}")
-    temp = Image.open(inputImage)
-    temptab = np.array(temp)
     
-    if applyGaussian:  
-        width, height = temptab.shape[1], temptab.shape[0]
-        blocksPerGrid_x = math.ceil(width / threadBlockSize[0])
-        blocksPerGrid_y = math.ceil(height / threadBlockSize[1])
-        blocksPerGrid = (blocksPerGrid_x, blocksPerGrid_y)
-
-        output_gauss = gpu_gaussian_blur(temptab, threadBlockSize, blocksPerGrid)
-        temptab = output_gauss
-
+    openedImage = Image.open(inputImage)
+    npArrayImage = np.array(openedImage)
+    blocksPerGrid = calcultateBlocksPerGrid(npArrayImage)
+    
     if applyBw:         
-        output_bw = gpu_rgb_to_bw(temptab)
-        temptab = output_bw
+        output_bw = gpu_rgb_to_bw(npArrayImage, threadBlockSize, blocksPerGrid)
+        npArrayImage = output_bw
+
+    if applyGaussian:
+        output_gauss = gpu_gaussian_blur(npArrayImage, threadBlockSize, blocksPerGrid)
+        npArrayImage = output_gauss
 
     if applySobel:
         if applyBw:
-            width, height = temptab.shape[1], temptab.shape[0]
-            blocksPerGrid_x = math.ceil(width / threadBlockSize[0])
-            blocksPerGrid_y = math.ceil(height / threadBlockSize[1])
-            blocksPerGrid = (blocksPerGrid_x, blocksPerGrid_y)
-          
-            magnitude = compute_gradients(temptab, threadBlockSize, blocksPerGrid)
+            magnitude = compute_gradients(npArrayImage, threadBlockSize, blocksPerGrid)
             # You can use magnitude and angle arrays for further processing or visualization
-            temptab = magnitude.astype(np.uint8)
+            npArrayImage = magnitude.astype(np.uint8)
             
             if applyThreshold:
                 threshold_value = 90  # Adjust threshold value as needed
-                thresholded_image = threshold_image(temptab, threadBlockSize, blocksPerGrid, threshold_value)
-                temptab = thresholded_image
+                thresholded_image = threshold_image(npArrayImage, threadBlockSize, blocksPerGrid, threshold_value)
+                npArrayImage = thresholded_image
 
-    m = Image.fromarray(temptab)
+    m = Image.fromarray(npArrayImage)
     m.save(outputImage)
