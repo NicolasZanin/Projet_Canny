@@ -84,18 +84,20 @@ def gaussian_blur_kernel(source, destination, filter):
 
 # Perform the GPU Kernel gaussian blur
 def gpu_gaussian_blur(image, threads_per_block, blocks_per_grid):
+    filter = np.array([[1, 4, 6, 4, 1],
+                    [4, 16, 24, 16, 4],
+                    [6, 24, 36, 24, 6],
+                    [4, 16, 24, 16, 4],
+                    [1, 4, 6, 4, 1]])
+
     device_input_image = cuda.to_device(image)
     device_output_image = cuda.device_array_like(image)
-    filter = np.array([[1, 4, 6, 4, 1],
-                       [4, 16, 24, 16, 4],
-                       [6, 24, 36, 24, 6],
-                       [4, 16, 24, 16, 4],
-                       [1, 4, 6, 4, 1]])
+    device_filter = cuda.to_device(filter)
 
-    gaussian_blur_kernel[blocks_per_grid, threads_per_block](device_input_image, device_output_image, filter)
+    gaussian_blur_kernel[blocks_per_grid, threads_per_block](device_input_image, device_output_image, device_filter)
     return device_output_image.copy_to_host()
 
-# Performs sobel kernel on a single pixel
+# Perform sobel kernel on a single pixel
 @cuda.jit
 def sobel_kernel(source, destination, sobel_x, sobel_y, clamped_magnitude):
     x, y = cuda.grid(2)
@@ -126,9 +128,6 @@ def sobel_kernel(source, destination, sobel_x, sobel_y, clamped_magnitude):
 
 # Perform the GPU Kernel Sobel
 def gpu_sobel(source, threads_per_block, blocks_per_grid):
-    device_input_image = cuda.to_device(source)
-    device_output_image = cuda.device_array_like(source)
-
     sobel_x = np.array([[-1, 0, 1],
                         [-2, 0, 2],
                         [-1, 0, 1]])
@@ -138,7 +137,12 @@ def gpu_sobel(source, threads_per_block, blocks_per_grid):
                         [1, 2, 1]])
     clamped_magnitude = 175
 
-    sobel_kernel[blocks_per_grid, threads_per_block](device_input_image, device_output_image, sobel_x, sobel_y, clamped_magnitude)
+    device_input_image = cuda.to_device(source)
+    device_output_image = cuda.device_array_like(source)
+    device_sobel_x = cuda.to_device(sobel_x)
+    device_sobel_y = cuda.to_device(sobel_y)
+
+    sobel_kernel[blocks_per_grid, threads_per_block](device_input_image, device_output_image, device_sobel_x, device_sobel_y, clamped_magnitude)
     return device_output_image.copy_to_host()
 
 # Perform threshold kernel on a single pixel
@@ -165,6 +169,7 @@ def gpu_threshold(source, threads_per_block, blocks_per_grid):
 
     return device_output_image.copy_to_host()
 
+# Perform hysterisis kernel on a single pixel
 @cuda.jit
 def hysterisis_kernel(source, destination):
     x, y = cuda.grid(2)
@@ -189,6 +194,7 @@ def hysterisis_kernel(source, destination):
             destination[x, y] = 0
 
 
+# Perform the GPU Kernel Hysterisis
 def gpu_hysterisis(source, threads_per_block, blocks_per_grid):
     device_input_image = cuda.to_device(source)
     device_output_image = cuda.device_array_like(source)
@@ -197,6 +203,7 @@ def gpu_hysterisis(source, threads_per_block, blocks_per_grid):
 
     return device_output_image.copy_to_host()
 
+# Get all args
 def getAllArgs():
     global input_image, output_image, apply_args, thread_block_size
 
