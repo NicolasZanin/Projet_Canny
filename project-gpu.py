@@ -16,6 +16,7 @@ applyBw = False
 applyGaussian = False
 applySobel = False
 applyThreshold = False
+applyHysterisis = False
 threadBlockSize = (8, 8)  # Default thread block size
 
 # Calculate Blocks par grid necessary for the source image depending on threadBlockSize
@@ -171,8 +172,40 @@ def gpu_threshold(source, threadsPerBlock, blocksPerGrid):
 
     return device_output_image.copy_to_host()
 
+@cuda.jit
+def HysterisisKernel(source, destination):
+    x, y = cuda.grid(2)
+    width, height = source.shape[:2]
+
+    if x < width and y < height:
+        if source[x, y] == 255:
+            destination[x, y] = 255
+        elif source[x, y] == 0:
+            destination[x, y] = 0
+        else:
+            for offsetX in range(-1, 2, 1):
+                for offsetY in range(-1, 2, 1):
+                    source_x = offsetX + x
+                    source_y = offsetY + y
+                    
+                    if source_x >= 0 and source_y >= 0 and source_x < width and source_y < height:
+                        if source[source_x, source_y] == 255:
+                            destination[x, y] = 255
+                            return
+            
+            destination[x, y] = 0
+
+
+def gpu_hysterisis(source, threadsPerBlock, blocksPerGrid):
+    device_input_image = cuda.to_device(source)
+    device_output_image = cuda.device_array_like(source)
+
+    HysterisisKernel[blocksPerGrid, threadsPerBlock](device_input_image, device_output_image)
+
+    return device_output_image.copy_to_host()
+
 def getAllArgs():
-    global inputImage, outputImage, nombreThreads, applyBw, applyGaussian, applySobel, applyThreshold, threadBlockSize
+    global inputImage, outputImage, nombreThreads, applyBw, applyGaussian, applySobel, applyThreshold, applyHysterisis, threadBlockSize
     
     parser = argparse.ArgumentParser()
     
@@ -191,20 +224,28 @@ def getAllArgs():
     else:
         threadBlockSize = (8, 8)  # Default thread block size
 
-    if args.bw:
-        applyBw = True
-    if args.gauss:
-        applyBw = True
-        applyGaussian = True
-    if args.sobel:
-        applyBw = True
-        applyGaussian = True
-        applySobel = True
-    if args.threshold:
+    if (not args.bw) and (not args.gauss) and (not args.sobel) and (not args.threshold):
         applyBw = True
         applyGaussian = True
         applySobel = True
         applyThreshold = True
+        applyHysterisis = True
+    else:
+        if args.bw:
+            applyBw = True
+        if args.gauss:
+            applyBw = True
+            applyGaussian = True
+        if args.sobel:
+            applyBw = True
+            applyGaussian = True
+            applySobel = True
+        if args.threshold:
+            applyBw = True
+            applyGaussian = True
+            applySobel = True
+            applyThreshold = True
+    
     if args.inputImage is not None:
         inputImage = args.inputImage
     if args.outputImage is not None:
@@ -234,6 +275,10 @@ if __name__ == '__main__':
     if applyThreshold:
         thresholded_image = gpu_threshold(npArrayImage, threadBlockSize, blocksPerGrid)
         npArrayImage = thresholded_image
+    
+    if applyHysterisis:
+        hysterisis = gpu_hysterisis(npArrayImage, threadBlockSize, blocksPerGrid)
+        npArrayImage = hysterisis
 
     m = Image.fromarray(npArrayImage)
     m.save(outputImage)
