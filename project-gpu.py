@@ -57,7 +57,7 @@ def gpu_rgb_to_bw(source, threadsPerBlock, blockspergrid):
     output = device_output_image.copy_to_host()
     return output
 
-# Performs Gaussian blurring on a single pixel
+# Performs Gaussian blurring kernel on a single pixel
 @cuda.jit
 def GaussianBlurKernel(source, destination, filter):
     x, y = cuda.grid(2)
@@ -101,9 +101,9 @@ def gpu_gaussian_blur(image, threadsPerBlock, blocksPerGrid):
     GaussianBlurKernel[blocksPerGrid, threadsPerBlock](device_input_image, device_output_image, filter)
     return device_output_image.copy_to_host()
 
-# Performs sobel on a single pixel
+# Performs sobel kernel on a single pixel
 @cuda.jit
-def sobelKernel(source, destination, sobel_x, sobel_y, clamped_magnitude):
+def SobelKernel(source, destination, sobel_x, sobel_y, clamped_magnitude):
     x, y = cuda.grid(2)
     sizeSobelX = sobel_x.shape
 
@@ -144,25 +144,32 @@ def gpu_sobel(source, threadsPerBlock, blocksPerGrid):
                         [1, 2, 1]])
     clamped_magnitude = 175
 
-    sobelKernel[blocksPerGrid, threadsPerBlock](device_input_image, device_output_image, sobel_x, sobel_y, clamped_magnitude)
+    SobelKernel[blocksPerGrid, threadsPerBlock](device_input_image, device_output_image, sobel_x, sobel_y, clamped_magnitude)
     return device_output_image.copy_to_host()
 
+# Performs threshold kernel on a single pixel
 @cuda.jit
-def ThresholdKernel(source, destination, threshold):
+def ThresholdKernel(source, destination, lowThreshold, highThreshold):
     x, y = cuda.grid(2)
+    
     if x < source.shape[0] and y < source.shape[1]:
-        if source[y, x] >= threshold:
-            destination[y, x] = 255  # Potential edge
+        if source[x, y] >= highThreshold:
+            destination[x, y] = 255  # Potential edge
+        elif source[x, y] >= lowThreshold:
+            destination[x, y] = 128 # Weak edge 
         else:
-            destination[y, x] = 0
+            destination[x, y] = 0
 
-def threshold_image(image, threadsPerBlock, blocksPerGrid, threshold):
-    s_image = cuda.to_device(image)
-    d_image = cuda.device_array_like(image)
+# Perform the GPU Kernel Threshold
+def gpu_threshold(source, threadsPerBlock, blocksPerGrid):
+    device_input_image = cuda.to_device(source)
+    device_output_image = cuda.device_array_like(source)
+    lowThreshold = 51
+    highThreshold = 102 
 
-    ThresholdKernel[blocksPerGrid, threadsPerBlock](s_image, d_image, threshold)
+    ThresholdKernel[blocksPerGrid, threadsPerBlock](device_input_image, device_output_image, lowThreshold, highThreshold)
 
-    return d_image.copy_to_host()
+    return device_output_image.copy_to_host()
 
 def getAllArgs():
     global inputImage, outputImage, nombreThreads, applyBw, applyGaussian, applySobel, applyThreshold, threadBlockSize
@@ -194,6 +201,9 @@ def getAllArgs():
         applyGaussian = True
         applySobel = True
     if args.threshold:
+        applyBw = True
+        applyGaussian = True
+        applySobel = True
         applyThreshold = True
     if args.inputImage is not None:
         inputImage = args.inputImage
@@ -221,10 +231,9 @@ if __name__ == '__main__':
         # You can use magnitude and angle arrays for further processing or visualization
         npArrayImage = magnitude.astype(np.uint8)
             
-        if applyThreshold:
-            threshold_value = 90  # Adjust threshold value as needed
-            thresholded_image = threshold_image(npArrayImage, threadBlockSize, blocksPerGrid, threshold_value)
-            npArrayImage = thresholded_image
+    if applyThreshold:
+        thresholded_image = gpu_threshold(npArrayImage, threadBlockSize, blocksPerGrid)
+        npArrayImage = thresholded_image
 
     m = Image.fromarray(npArrayImage)
     m.save(outputImage)
