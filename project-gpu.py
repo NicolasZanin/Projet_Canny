@@ -78,7 +78,7 @@ def GaussianBlurKernel(source, destination, filter):
                 if source_x >= 0 and source_x < width and source_y >= 0 and source_y < height:
                     pixel_value = source[source_x, source_y]
                 else:
-                    pixel_value = source[indexFilterX, indexFilterY] 
+                    pixel_value = source[x, y]
                 
                 weighted_sum += pixel_value * filter[indexFilterX][indexFilterY]
                 normalization_factor += filter[indexFilterX][indexFilterY]
@@ -86,8 +86,9 @@ def GaussianBlurKernel(source, destination, filter):
         if normalization_factor != 0:
             destination[x, y] = int(math.ceil(weighted_sum // normalization_factor))
         else:
-            destination[x, y] = source[x, y]
+            destination[x, y] = 0
 
+# Perform the GPU Kernel gaussian blur
 def gpu_gaussian_blur(image, threadsPerBlock, blocksPerGrid):
     device_input_image = cuda.to_device(image)
     device_output_image = cuda.device_array_like(image)
@@ -100,30 +101,40 @@ def gpu_gaussian_blur(image, threadsPerBlock, blocksPerGrid):
     GaussianBlurKernel[blocksPerGrid, threadsPerBlock](device_input_image, device_output_image, filter)
     return device_output_image.copy_to_host()
 
+# Performs sobel on a single pixel
 @cuda.jit
-def GradientsKernel(source, destination, sobel_x, sobel_y, max_value):
+def sobelKernel(source, destination, sobel_x, sobel_y, clamped_magnitude):
     x, y = cuda.grid(2)
+    sizeSobelX = sobel_x.shape
+
     if x < source.shape[0] and y < source.shape[1]:
-        height, width = source.shape[:2]
+        # Apply the sobel mask on a single pixel
+        width, height = source.shape[:2]
         gradient_x = 0
         gradient_y = 0
-        for i in range(len(sobel_x)):
-            for j in range(len(sobel_x[0])):
-                nx = x + i - len(sobel_x) // 2
-                ny = y + j - len(sobel_x[0]) // 2
-                if nx >= 0 and nx < width and ny >= 0 and ny < height:
-                    pixel_value = source[ny, nx]
+        
+        for indexSobelX in range(sizeSobelX[0]):
+            for indexSobelY in range(sizeSobelX[1]):
+                source_x = x + indexSobelX - sizeSobelX[0] // 2
+                source_y = y + indexSobelY - sizeSobelX[1] // 2
+                
+                if source_x >= 0 and source_x < width and source_y >= 0 and source_y < height:
+                    pixel_value = source[source_x, source_y]
                 else:
-                    pixel_value = source[y, x]  
-                gradient_x += pixel_value * sobel_x[i][j]
-                gradient_y += pixel_value * sobel_y[i][j]
+                    pixel_value = source[x, y]  
+                
+                gradient_x += pixel_value * sobel_x[indexSobelX][indexSobelY]
+                gradient_y += pixel_value * sobel_y[indexSobelX][indexSobelY]
+        
         magnitude = math.sqrt(gradient_x**2 + gradient_y**2)
-        magnitude = min(magnitude, max_value)  # Clamp the magnitude
-        destination[y, x] = magnitude
+        magnitude = min(magnitude, clamped_magnitude)
+        destination[x, y] = magnitude
 
-def compute_gradients(image, threadsPerBlock, blocksPerGrid):
-    s_image = cuda.to_device(image)
-    d_image = cuda.device_array_like(image)
+# Perform the GPU Kernel Sobel
+def gpu_sobel(source, threadsPerBlock, blocksPerGrid):
+    device_input_image = cuda.to_device(source)
+    device_output_image = cuda.device_array_like(source)
+    
     sobel_x = np.array([[-1, 0, 1],
                         [-2, 0, 2],
                         [-1, 0, 1]])
@@ -131,9 +142,10 @@ def compute_gradients(image, threadsPerBlock, blocksPerGrid):
     sobel_y = np.array([[-1, -2, -1],
                         [0, 0, 0],
                         [1, 2, 1]])
-    max_value = 175
-    GradientsKernel[blocksPerGrid, threadsPerBlock] (s_image, d_image, sobel_x, sobel_y, max_value)
-    return d_image.copy_to_host()
+    clamped_magnitude = 175
+
+    sobelKernel[blocksPerGrid, threadsPerBlock](device_input_image, device_output_image, sobel_x, sobel_y, clamped_magnitude)
+    return device_output_image.copy_to_host()
 
 @cuda.jit
 def ThresholdKernel(source, destination, threshold):
@@ -178,6 +190,8 @@ def getAllArgs():
         applyBw = True
         applyGaussian = True
     if args.sobel:
+        applyBw = True
+        applyGaussian = True
         applySobel = True
     if args.threshold:
         applyThreshold = True
@@ -203,15 +217,14 @@ if __name__ == '__main__':
         npArrayImage = output_gauss
 
     if applySobel:
-        if applyBw:
-            magnitude = compute_gradients(npArrayImage, threadBlockSize, blocksPerGrid)
-            # You can use magnitude and angle arrays for further processing or visualization
-            npArrayImage = magnitude.astype(np.uint8)
+        magnitude = gpu_sobel(npArrayImage, threadBlockSize, blocksPerGrid)
+        # You can use magnitude and angle arrays for further processing or visualization
+        npArrayImage = magnitude.astype(np.uint8)
             
-            if applyThreshold:
-                threshold_value = 90  # Adjust threshold value as needed
-                thresholded_image = threshold_image(npArrayImage, threadBlockSize, blocksPerGrid, threshold_value)
-                npArrayImage = thresholded_image
+        if applyThreshold:
+            threshold_value = 90  # Adjust threshold value as needed
+            thresholded_image = threshold_image(npArrayImage, threadBlockSize, blocksPerGrid, threshold_value)
+            npArrayImage = thresholded_image
 
     m = Image.fromarray(npArrayImage)
     m.save(outputImage)
